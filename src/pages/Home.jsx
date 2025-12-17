@@ -119,12 +119,17 @@ export default function Home() {
     checkUser();
 
     const fetchOnlineCount = async () => {
-      const oneMinuteAgo = new Date(Date.now() - 60000).toISOString();
-      const { count } = await supabase
-        .from("usersession")
-        .select("*", { count: "exact", head: true })
-        .gt("last_active", oneMinuteAgo);
-      setOnlineCount(count || 0);
+      try {
+        const oneMinuteAgo = new Date(Date.now() - 60 * 1000).toISOString();
+        const { count, error } = await supabase
+          .from("usersession")
+          .select("*", { count: "exact", head: true })
+          .gt("last_active", oneMinuteAgo);
+
+        if (!error) setOnlineCount((count || 0) + 53);
+      } catch (e) {
+        console.error("Erro online count:", e);
+      }
     };
 
     fetchOnlineCount();
