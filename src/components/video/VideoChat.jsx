@@ -112,7 +112,11 @@ export default function VideoChat({
     const initWebRTC = async () => {
       try {
         const stream = await navigator.mediaDevices.getUserMedia({
-          video: true,
+          video: {
+            width: { ideal: 1280 }, // Tenta HD
+            height: { ideal: 720 },
+            frameRate: { ideal: 30 },
+          },
           audio: true,
         });
         localStreamRef.current = stream;
