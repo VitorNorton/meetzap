@@ -77,6 +77,8 @@ export default function VideoChat({
     [sessionId, partnerInfo?.id]
   );
 
+  const iceCandidatesQueue = useRef([]);
+
   const handleIncomingSignal = useCallback(
     async (signal) => {
       if (!peerConnection.current) return;
@@ -89,14 +91,27 @@ export default function VideoChat({
           const answer = await peerConnection.current.createAnswer();
           await peerConnection.current.setLocalDescription(answer);
           sendSignal("answer", answer);
+
+          while (iceCandidatesQueue.current.length > 0) {
+            const candidate = iceCandidatesQueue.current.shift();
+            await peerConnection.current.addIceCandidate(candidate);
+          }
         } else if (type === "answer") {
           await peerConnection.current.setRemoteDescription(
             new RTCSessionDescription(data)
           );
+
+          while (iceCandidatesQueue.current.length > 0) {
+            const candidate = iceCandidatesQueue.current.shift();
+            await peerConnection.current.addIceCandidate(candidate);
+          }
         } else if (type === "ice-candidate") {
-          await peerConnection.current.addIceCandidate(
-            new RTCIceCandidate(data)
-          );
+          const candidate = new RTCIceCandidate(data);
+          if (peerConnection.current.remoteDescription) {
+            await peerConnection.current.addIceCandidate(candidate);
+          } else {
+            iceCandidatesQueue.current.push(candidate);
+          }
         }
       } catch (err) {
         console.error("Erro sinal:", err);
