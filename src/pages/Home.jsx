@@ -74,6 +74,7 @@ export default function Home() {
   const [selectedPlan, setSelectedPlan] = useState(null);
   const [showEmailSettings, setShowEmailSettings] = useState(false);
   const [showTerms, setShowTerms] = useState(false);
+  const [authMode, setAuthMode] = useState("signup");
 
   // Sincronizar preferências com LocalStorage
   useEffect(() => {
@@ -96,7 +97,6 @@ export default function Home() {
     expandSearch,
   ]);
 
-  // Buscar Perfil e Contagem Online via Supabase Realtime
   const fetchUserProfile = useCallback(async (userId) => {
     const { data } = await supabase
       .from("user_profiles")
@@ -125,7 +125,6 @@ export default function Home() {
           .from("usersession")
           .select("*", { count: "exact", head: true })
           .gt("last_active", oneMinuteAgo);
-
         if (!error) setOnlineCount((count || 0) + 53);
       } catch (e) {
         console.error("Erro online count:", e);
@@ -139,11 +138,9 @@ export default function Home() {
 
   const canProceed = country && city && myGender && lookingFor && myAge >= 18;
 
-  // --- LÓGICA DE MATCHMAKING REALTIME ---
   const startSearching = async () => {
     setStep("video");
     setPartner(null);
-
     const newSession = await MatchmakingService.joinQueue({
       country,
       city,
@@ -156,7 +153,6 @@ export default function Home() {
     });
     setSession(newSession);
 
-    // Inscrição no canal Realtime para detetar o parceiro instantaneamente
     const channel = supabase
       .channel(`match:${newSession.id}`)
       .on(
@@ -181,7 +177,6 @@ export default function Home() {
       )
       .subscribe();
 
-    // Tenta encontrar um parceiro compatível imediatamente
     const partnerFound = await MatchmakingService.findCompatiblePartner(
       newSession
     );
@@ -193,7 +188,9 @@ export default function Home() {
   };
 
   const handleEnd = async () => {
-    if (session?.id) await MatchmakingService.leaveQueue(session.id);
+    if (session?.id) {
+      await MatchmakingService.leaveQueue(session.id);
+    }
     setPartner(null);
     setSession(null);
     setStep("preferences");
@@ -215,6 +212,7 @@ export default function Home() {
   if (step === "email_register")
     return (
       <EmailRegister
+        initialMode={authMode}
         onBack={() => setStep("welcome")}
         onComplete={(email) => {
           setUserEmail(email);
@@ -224,7 +222,6 @@ export default function Home() {
     );
 
   if (step === "video") {
-    // Tela de Radar enquanto procura
     if (!partner) {
       return (
         <div className="min-h-screen bg-gradient-to-br from-gray-900 via-purple-900 to-gray-900 flex flex-col items-center justify-center p-6 text-center">
@@ -269,14 +266,19 @@ export default function Home() {
           <EmailSettings onClose={() => setShowEmailSettings(false)} />
         )}
       </AnimatePresence>
+
       {showTerms && (
         <TermsOfUse
           onAccept={() => {
             setShowTerms(false);
+            setAuthMode("signup");
             setStep("email_register");
           }}
+          // CORREÇÃO AQUI: Conectando a função de fechar ao botão Cancelar
+          onDecline={() => setShowTerms(false)}
         />
       )}
+
       {showPricing && (
         <PricingPlans
           currentPlan="free"
@@ -284,6 +286,7 @@ export default function Home() {
           onClose={() => setShowPricing(false)}
         />
       )}
+
       {selectedPlan && (
         <PaymentModal
           plan={selectedPlan}
@@ -307,7 +310,6 @@ export default function Home() {
               animate={{ opacity: 1 }}
               className="w-full text-center"
             >
-              {/* Logo */}
               <div className="relative mb-8 w-28 h-28 mx-auto">
                 <div className="absolute inset-0 rounded-3xl bg-gradient-to-br from-pink-500 via-purple-600 to-blue-500 shadow-2xl" />
                 <div className="absolute inset-0 flex items-center justify-center">
@@ -326,7 +328,6 @@ export default function Home() {
                 Conheça pessoas incríveis por vídeo
               </p>
 
-              {/* Grid de Features */}
               <div className="grid grid-cols-3 gap-4 mb-12 w-full">
                 {[
                   { icon: Globe, label: "Global" },
@@ -342,7 +343,6 @@ export default function Home() {
                 ))}
               </div>
 
-              {/* Contador Online */}
               <div className="inline-flex items-center gap-2 mb-8 px-4 py-1.5 rounded-full bg-black/20 border border-white/10 text-xs">
                 <div className="w-2 h-2 rounded-full bg-green-500 animate-pulse" />
                 <span className="text-white/80">
@@ -375,22 +375,27 @@ export default function Home() {
                     <Button
                       onClick={() => setShowEmailSettings(true)}
                       variant="outline"
-                      className="w-full h-12 rounded-2xl bg-white/80 hover:bg-white border-none text-[#1a0b2e] font-bold flex items-center justify-center gap-2 text-sm shadow-lg transition-all"
+                      className="w-full h-12 rounded-2xl bg-white/80 hover:bg-white border-none text-[#1a0b2e] font-bold flex items-center justify-center gap-2 text-sm shadow-lg"
                     >
-                      <Mail className="w-4 h-4 text-[#1a0b2e]" />
-                      Gerenciar conta
+                      <Mail className="w-4 h-4 text-[#1a0b2e]" /> Gerenciar
+                      conta
                     </Button>
                   </>
                 ) : (
                   <>
                     <Button
-                      onClick={() => setStep("email_register")}
+                      onClick={() => {
+                        setShowTerms(true);
+                      }}
                       className="w-full h-16 rounded-2xl bg-gradient-to-r from-pink-500 via-purple-500 to-blue-500 text-white text-lg font-bold shadow-2xl"
                     >
                       Começar <ArrowRight className="w-5 h-5 ml-2" />
                     </Button>
                     <Button
-                      onClick={() => setStep("email_register")}
+                      onClick={() => {
+                        setAuthMode("login");
+                        setStep("email_register");
+                      }}
                       variant="outline"
                       className="w-full h-14 rounded-2xl bg-white/10 border-white/20 text-white flex items-center justify-center gap-3"
                     >
@@ -426,8 +431,6 @@ export default function Home() {
                   onMyGenderChange={setMyGender}
                   onLookingForChange={setLookingFor}
                 />
-
-                {/* Expandir Busca */}
                 <div className="flex items-center justify-between gap-4 py-2 border-t border-white/5 pt-4">
                   <div className="flex-1">
                     <p className="text-white font-semibold text-sm">
@@ -443,8 +446,6 @@ export default function Home() {
                     className="data-[state=checked]:bg-pink-500"
                   />
                 </div>
-
-                {/* Idade */}
                 <div className="space-y-4 border-t border-white/5 pt-4">
                   <div className="flex items-center gap-3">
                     <div className="w-10 h-10 rounded-xl bg-blue-500 flex items-center justify-center">
@@ -459,7 +460,6 @@ export default function Home() {
                     onChange={(e) => setMyAge(parseInt(e.target.value) || "")}
                     className="bg-white/5 border-white/10 text-white"
                   />
-
                   <div className="space-y-3">
                     <Label className="text-white/80 text-xs">
                       Faixa de idade desejada
@@ -480,7 +480,6 @@ export default function Home() {
                     </div>
                   </div>
                 </div>
-
                 <Button
                   onClick={startSearching}
                   disabled={!canProceed}
