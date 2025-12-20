@@ -28,7 +28,6 @@ export default function VideoChat({
   const remoteVideoRef = useRef(null);
   const peerConnection = useRef(null);
   const localStreamRef = useRef(null);
-
   const iceCandidatesQueue = useRef([]);
 
   const rtcConfig = useMemo(
@@ -98,9 +97,7 @@ export default function VideoChat({
               iceCandidatesQueue.current.shift()
             );
           }
-        }
-
-        if (type === "answer") {
+        } else if (type === "answer") {
           if (peerConnection.current.signalingState === "have-local-offer") {
             await peerConnection.current.setRemoteDescription(
               new RTCSessionDescription(data)
@@ -112,9 +109,7 @@ export default function VideoChat({
               );
             }
           }
-        }
-
-        if (type === "ice") {
+        } else if (type === "ice") {
           const candidate = new RTCIceCandidate({
             candidate: data.candidate,
             sdpMid: data.sdpMid,
@@ -139,9 +134,13 @@ export default function VideoChat({
 
     let channel;
 
-    const init = async () => {
+    const initWebRTC = async () => {
       const stream = await navigator.mediaDevices.getUserMedia({
-        video: { width: 1280, height: 720, frameRate: 30 },
+        video: {
+          width: { ideal: 1280 },
+          height: { ideal: 720 },
+          frameRate: { ideal: 30 },
+        },
         audio: true,
       });
 
@@ -152,12 +151,11 @@ export default function VideoChat({
 
       stream
         .getTracks()
-        .forEach((t) => peerConnection.current.addTrack(t, stream));
+        .forEach((track) => peerConnection.current.addTrack(track, stream));
 
       peerConnection.current.ontrack = (e) => {
-        if (remoteVideoRef.current) {
+        if (remoteVideoRef.current)
           remoteVideoRef.current.srcObject = e.streams[0];
-        }
       };
 
       peerConnection.current.onicecandidate = (e) => {
@@ -187,7 +185,7 @@ export default function VideoChat({
       }
     };
 
-    init();
+    initWebRTC();
 
     return () => {
       localStreamRef.current?.getTracks().forEach((t) => t.stop());
@@ -196,56 +194,100 @@ export default function VideoChat({
     };
   }, [sessionId, partnerInfo, rtcConfig, sendSignal, handleIncomingSignal]);
 
-  if (!sessionId || !partnerInfo) return null;
+  if (!partnerInfo || !sessionId) return null;
 
   return (
-    <div className="fixed inset-0 bg-black z-50">
-      <video
-        ref={remoteVideoRef}
-        autoPlay
-        playsInline
-        className="w-full h-full object-cover"
-      />
-
-      <div className="absolute top-6 right-6 w-40 aspect-video bg-black rounded-xl overflow-hidden">
+    <div className="fixed inset-0 bg-black z-50 overflow-hidden">
+      <div className="relative w-full h-full bg-gray-900 flex items-center justify-center">
+        {/* VÍDEO REMOTO (TELA TODA) */}
         <video
-          ref={localVideoRef}
+          ref={remoteVideoRef}
           autoPlay
           playsInline
-          muted
           className="w-full h-full object-cover"
         />
-      </div>
 
-      {showChat && (
-        <VideoTextChat
-          sessionId={sessionId}
-          partnerName={partnerInfo.display_name}
-          myName={myName}
-          myId={sessionId}
-          isOpen={showChat}
-          setIsOpen={setShowChat}
-        />
-      )}
+        {/* VÍDEO LOCAL (FLUTUANTE) */}
+        <div className="absolute top-6 right-6 w-32 md:w-56 aspect-video bg-black rounded-2xl border-2 border-white/20 overflow-hidden shadow-2xl z-20">
+          <video
+            ref={localVideoRef}
+            autoPlay
+            playsInline
+            muted
+            className="w-full h-full object-cover"
+          />
+          {isVideoOff && (
+            <div className="absolute inset-0 bg-gray-800 flex items-center justify-center">
+              <VideoOff className="text-white/40 w-10 h-10" />
+            </div>
+          )}
+        </div>
 
-      <div className="absolute bottom-6 left-1/2 -translate-x-1/2 flex gap-4">
-        <Button onClick={toggleAudio}>{isMuted ? <MicOff /> : <Mic />}</Button>
+        {/* CHAT FLUTUANTE */}
+        {showChat && (
+          <div className="absolute bottom-28 left-6 z-40 w-80 max-h-[400px] shadow-2xl">
+            <VideoTextChat
+              sessionId={sessionId}
+              partnerName={partnerInfo?.display_name || "Parceiro"}
+              myName={myName}
+              myId={sessionId}
+              isOpen={showChat}
+              setIsOpen={setShowChat}
+            />
+          </div>
+        )}
 
-        <Button onClick={toggleVideo}>
-          {isVideoOff ? <VideoOff /> : <VideoIcon />}
-        </Button>
+        {/* CONTROLES */}
+        <div className="absolute bottom-10 left-1/2 -translate-x-1/2 flex items-center gap-4 px-8 py-5 bg-black/40 backdrop-blur-3xl rounded-3xl border border-white/10 z-50">
+          <Button
+            variant="ghost"
+            size="icon"
+            onClick={toggleAudio}
+            className={`rounded-full h-12 w-12 ${
+              isMuted ? "bg-red-500" : "bg-white/10 hover:bg-white/20"
+            }`}
+          >
+            {isMuted ? <MicOff /> : <Mic />}
+          </Button>
 
-        <Button onClick={onSkip}>
-          <SkipForward />
-        </Button>
+          <Button
+            variant="ghost"
+            size="icon"
+            onClick={toggleVideo}
+            className={`rounded-full h-12 w-12 ${
+              isVideoOff ? "bg-red-500" : "bg-white/10 hover:bg-white/20"
+            }`}
+          >
+            {isVideoOff ? <VideoOff /> : <VideoIcon />}
+          </Button>
 
-        <Button onClick={() => setShowChat(!showChat)}>
-          <MessageSquare />
-        </Button>
+          <Button
+            onClick={onSkip}
+            className="h-14 px-10 rounded-2xl bg-gradient-to-r from-pink-500 to-purple-600 font-bold text-white shadow-xl hover:scale-105 transition-all"
+          >
+            <SkipForward className="mr-2 h-5 w-5" /> PRÓXIMO
+          </Button>
 
-        <Button variant="destructive" onClick={onEnd}>
-          <X />
-        </Button>
+          <Button
+            variant="ghost"
+            size="icon"
+            onClick={() => setShowChat(!showChat)}
+            className={`rounded-full h-12 w-12 ${
+              showChat ? "bg-purple-500" : "bg-white/10 hover:bg-white/20"
+            }`}
+          >
+            <MessageSquare />
+          </Button>
+
+          <Button
+            variant="destructive"
+            size="icon"
+            onClick={onEnd}
+            className="rounded-full h-12 w-12 shadow-lg"
+          >
+            <X />
+          </Button>
+        </div>
       </div>
     </div>
   );
