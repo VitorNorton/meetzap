@@ -8,7 +8,6 @@ import { Send, X, ChevronDown } from "lucide-react";
 export default function VideoTextChat({
   sessionId,
   partnerName,
-  myName,
   myId,
   setIsOpen,
 }) {
@@ -16,17 +15,22 @@ export default function VideoTextChat({
   const [newMessage, setNewMessage] = useState("");
   const scrollRef = useRef(null);
 
-  // Auto-scroll para a última mensagem
+  /* =========================
+     AUTO SCROLL
+  ========================= */
   useEffect(() => {
     if (scrollRef.current) {
       scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
     }
   }, [messages]);
 
-  // Escutar mensagens em tempo real
+  /* =========================
+     REALTIME + HISTÓRICO
+  ========================= */
   useEffect(() => {
     if (!sessionId) return;
 
+    // Realtime
     const channel = supabase
       .channel(`chat:${sessionId}`)
       .on(
@@ -34,27 +38,26 @@ export default function VideoTextChat({
         {
           event: "INSERT",
           schema: "public",
-          table: "ChatMessage",
+          table: "messages",
           filter: `session_id=eq.${sessionId}`,
         },
         (payload) => {
-          setMessages((prev) => {
-            // Evita duplicados se a mensagem for do próprio usuário
-            if (prev.find((m) => m.id === payload.new.id)) return prev;
-            return [...prev, payload.new];
-          });
+          setMessages((prev) => [...prev, payload.new]);
         }
       )
       .subscribe();
 
-    // Carregar histórico inicial
+    // Histórico inicial
     const fetchMessages = async () => {
-      const { data } = await supabase
-        .from("ChatMessage")
+      const { data, error } = await supabase
+        .from("messages")
         .select("*")
         .eq("session_id", sessionId)
         .order("created_at", { ascending: true });
-      if (data) setMessages(data);
+
+      if (!error && data) {
+        setMessages(data);
+      }
     };
 
     fetchMessages();
@@ -64,33 +67,42 @@ export default function VideoTextChat({
     };
   }, [sessionId]);
 
+  /* =========================
+     ENVIAR MENSAGEM
+  ========================= */
   const sendMessage = async (e) => {
     e.preventDefault();
+
     if (!newMessage.trim() || !sessionId) return;
 
     const messageData = {
       session_id: sessionId,
       sender_id: myId,
-      sender_name: myName,
       text: newMessage.trim(),
     };
 
-    setNewMessage(""); // Limpa o input imediatamente
+    setNewMessage("");
 
-    const { error } = await supabase.from("ChatMessage").insert([messageData]);
-    if (error) console.error("Erro ao enviar mensagem:", error);
+    const { error } = await supabase.from("messages").insert(messageData);
+
+    if (error) {
+      console.error("Erro ao enviar mensagem:", error);
+    }
   };
 
+  /* =========================
+     RENDER
+  ========================= */
   return (
     <div className="flex flex-col h-full bg-black/60 backdrop-blur-xl border-l border-white/10 text-white overflow-hidden rounded-t-3xl md:rounded-none">
-      {/* Header do Chat */}
+      {/* Header */}
       <div className="p-4 border-b border-white/10 flex items-center justify-between bg-white/5">
         <div>
           <h3 className="font-bold text-sm">
             Chat com {partnerName || "Parceiro"}
           </h3>
           <p className="text-[10px] text-green-400 flex items-center gap-1">
-            <span className="w-1.5 h-1.5 bg-green-500 rounded-full animate-pulse" />{" "}
+            <span className="w-1.5 h-1.5 bg-green-500 rounded-full animate-pulse" />
             Ao vivo
           </p>
         </div>
@@ -105,20 +117,21 @@ export default function VideoTextChat({
         </Button>
       </div>
 
-      {/* Lista de Mensagens */}
+      {/* Mensagens */}
       <div
         ref={scrollRef}
         className="flex-1 overflow-y-auto p-4 space-y-4 custom-scrollbar"
       >
-        {messages.map((msg, index) => {
+        {messages.map((msg) => {
           const isMe = msg.sender_id === myId;
+
           return (
             <div
-              key={msg.id || index}
+              key={msg.id}
               className={`flex flex-col ${isMe ? "items-end" : "items-start"}`}
             >
               <span className="text-[10px] text-white/40 mb-1 px-1">
-                {isMe ? "Você" : msg.sender_name || "Parceiro"}
+                {isMe ? "Você" : partnerName || "Parceiro"}
               </span>
               <div
                 className={`max-w-[85%] p-3 rounded-2xl text-sm ${
@@ -134,7 +147,7 @@ export default function VideoTextChat({
         })}
       </div>
 
-      {/* Input de Mensagem */}
+      {/* Input */}
       <form
         onSubmit={sendMessage}
         className="p-4 bg-white/5 border-t border-white/10 flex gap-2"
@@ -160,8 +173,6 @@ export default function VideoTextChat({
 VideoTextChat.propTypes = {
   sessionId: PropTypes.string.isRequired,
   partnerName: PropTypes.string,
-  myName: PropTypes.string,
   myId: PropTypes.string.isRequired,
-  isOpen: PropTypes.bool.isRequired,
   setIsOpen: PropTypes.func.isRequired,
 };

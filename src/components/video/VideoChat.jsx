@@ -1,16 +1,16 @@
-import { useState, useEffect, useRef, useCallback, useMemo } from "react";
-import PropTypes from "prop-types";
-import { supabase } from "@/lib/supabaseClient";
 import { Button } from "@/components/ui/button";
+import { supabase } from "@/lib/supabaseClient";
 import {
+  MessageSquare,
   Mic,
   MicOff,
   SkipForward,
-  MessageSquare,
-  X,
   Video as VideoIcon,
   VideoOff,
+  X,
 } from "lucide-react";
+import PropTypes from "prop-types";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import VideoTextChat from "./VideoTextChat";
 
 export default function VideoChat({
@@ -28,85 +28,99 @@ export default function VideoChat({
   const remoteVideoRef = useRef(null);
   const peerConnection = useRef(null);
   const localStreamRef = useRef(null);
-  const notificationSound = useRef(
-    new Audio(
-      "https://assets.mixkit.co/active_storage/sfx/2358/2358-preview.mp3"
-    )
-  );
+
+  const iceCandidatesQueue = useRef([]);
 
   const rtcConfig = useMemo(
     () => ({
-      iceServers: [{ urls: "stun:stun.l.google.com:19302" }],
+      iceServers: [
+        { urls: "stun:stun.l.google.com:19302" },
+        {
+          urls: "turn:openrelay.metered.ca:443",
+          username: "openrelayproject",
+          credential: "openrelayproject",
+        },
+      ],
     }),
     []
   );
 
   const toggleAudio = () => {
-    if (localStreamRef.current) {
-      const audioTrack = localStreamRef.current.getAudioTracks()[0];
-      if (audioTrack) {
-        audioTrack.enabled = isMuted;
-        setIsMuted(!isMuted);
-      }
+    const track = localStreamRef.current?.getAudioTracks()[0];
+    if (track) {
+      track.enabled = !track.enabled;
+      setIsMuted(!track.enabled);
     }
   };
 
   const toggleVideo = () => {
-    if (localStreamRef.current) {
-      const videoTrack = localStreamRef.current.getVideoTracks()[0];
-      if (videoTrack) {
-        videoTrack.enabled = isVideoOff;
-        setIsVideoOff(!isVideoOff);
-      }
+    const track = localStreamRef.current?.getVideoTracks()[0];
+    if (track) {
+      track.enabled = !track.enabled;
+      setIsVideoOff(!track.enabled);
     }
   };
 
   const sendSignal = useCallback(
     async (type, data) => {
-      if (!partnerInfo?.id || !sessionId) return;
-      await supabase.from("VideoSignal").insert([
-        {
-          from_session_id: sessionId,
-          to_session_id: partnerInfo.id,
-          type,
-          data,
-          created_date: new Date().toISOString(),
-        },
-      ]);
+      if (!sessionId || !partnerInfo?.id) return;
+      await supabase.from("VideoSignal").insert({
+        from_session_id: sessionId,
+        to_session_id: partnerInfo.id,
+        type,
+        data,
+      });
     },
     [sessionId, partnerInfo?.id]
   );
 
-  const iceCandidatesQueue = useRef([]);
-
   const handleIncomingSignal = useCallback(
     async (signal) => {
       if (!peerConnection.current) return;
+      if (signal.from_session_id === sessionId) return;
+
       const { type, data } = signal;
+
       try {
         if (type === "offer") {
+          if (peerConnection.current.signalingState !== "stable") return;
+
           await peerConnection.current.setRemoteDescription(
             new RTCSessionDescription(data)
           );
+
           const answer = await peerConnection.current.createAnswer();
           await peerConnection.current.setLocalDescription(answer);
           sendSignal("answer", answer);
 
-          while (iceCandidatesQueue.current.length > 0) {
-            const candidate = iceCandidatesQueue.current.shift();
-            await peerConnection.current.addIceCandidate(candidate);
+          while (iceCandidatesQueue.current.length) {
+            await peerConnection.current.addIceCandidate(
+              iceCandidatesQueue.current.shift()
+            );
           }
-        } else if (type === "answer") {
-          await peerConnection.current.setRemoteDescription(
-            new RTCSessionDescription(data)
-          );
+        }
 
-          while (iceCandidatesQueue.current.length > 0) {
-            const candidate = iceCandidatesQueue.current.shift();
-            await peerConnection.current.addIceCandidate(candidate);
+        if (type === "answer") {
+          if (peerConnection.current.signalingState === "have-local-offer") {
+            await peerConnection.current.setRemoteDescription(
+              new RTCSessionDescription(data)
+            );
+
+            while (iceCandidatesQueue.current.length) {
+              await peerConnection.current.addIceCandidate(
+                iceCandidatesQueue.current.shift()
+              );
+            }
           }
-        } else if (type === "ice-candidate") {
-          const candidate = new RTCIceCandidate(data);
+        }
+
+        if (type === "ice") {
+          const candidate = new RTCIceCandidate({
+            candidate: data.candidate,
+            sdpMid: data.sdpMid,
+            sdpMLineIndex: data.sdpMLineIndex,
+          });
+
           if (peerConnection.current.remoteDescription) {
             await peerConnection.current.addIceCandidate(candidate);
           } else {
@@ -114,168 +128,124 @@ export default function VideoChat({
           }
         }
       } catch (err) {
-        console.error("Erro sinal:", err);
+        console.error("Erro no signaling:", err);
       }
     },
-    [sendSignal]
+    [sendSignal, sessionId]
   );
 
   useEffect(() => {
     if (!sessionId || !partnerInfo?.id) return;
-    notificationSound.current.play().catch(() => {});
 
-    const initWebRTC = async () => {
-      try {
-        const stream = await navigator.mediaDevices.getUserMedia({
-          video: {
-            width: { ideal: 1280 }, // Tenta HD
-            height: { ideal: 720 },
-            frameRate: { ideal: 30 },
-          },
-          audio: true,
-        });
-        localStreamRef.current = stream;
-        if (localVideoRef.current) localVideoRef.current.srcObject = stream;
+    let channel;
 
-        peerConnection.current = new RTCPeerConnection(rtcConfig);
-        stream
-          .getTracks()
-          .forEach((track) => peerConnection.current.addTrack(track, stream));
+    const init = async () => {
+      const stream = await navigator.mediaDevices.getUserMedia({
+        video: { width: 1280, height: 720, frameRate: 30 },
+        audio: true,
+      });
 
-        peerConnection.current.ontrack = (e) => {
-          if (remoteVideoRef.current)
-            remoteVideoRef.current.srcObject = e.streams[0];
-        };
+      localStreamRef.current = stream;
+      if (localVideoRef.current) localVideoRef.current.srcObject = stream;
 
-        peerConnection.current.onicecandidate = (e) => {
-          if (e.candidate) sendSignal("ice-candidate", e.candidate);
-        };
+      peerConnection.current = new RTCPeerConnection(rtcConfig);
 
-        const channel = supabase
-          .channel(`signals:${sessionId}`)
-          .on(
-            "postgres_changes",
-            {
-              event: "INSERT",
-              schema: "public",
-              table: "VideoSignal",
-              filter: `to_session_id=eq.${sessionId}`,
-            },
-            (payload) => handleIncomingSignal(payload.new)
-          )
-          .subscribe();
+      stream
+        .getTracks()
+        .forEach((t) => peerConnection.current.addTrack(t, stream));
 
-        if (sessionId < partnerInfo.id) {
-          const offer = await peerConnection.current.createOffer();
-          await peerConnection.current.setLocalDescription(offer);
-          sendSignal("offer", offer);
+      peerConnection.current.ontrack = (e) => {
+        if (remoteVideoRef.current) {
+          remoteVideoRef.current.srcObject = e.streams[0];
         }
+      };
 
-        return () => {
-          stream.getTracks().forEach((t) => t.stop());
-          supabase.removeChannel(channel);
-        };
-      } catch (err) {
-        console.error("Erro mídia:", err);
+      peerConnection.current.onicecandidate = (e) => {
+        if (e.candidate) sendSignal("ice", e.candidate);
+      };
+
+      channel = supabase
+        .channel(`signals:${sessionId}`)
+        .on(
+          "postgres_changes",
+          {
+            event: "INSERT",
+            schema: "public",
+            table: "VideoSignal",
+            filter: `to_session_id=eq.${sessionId}`,
+          },
+          (payload) => handleIncomingSignal(payload.new)
+        )
+        .subscribe();
+
+      const isCaller = sessionId.localeCompare(partnerInfo.id) < 0;
+
+      if (isCaller) {
+        const offer = await peerConnection.current.createOffer();
+        await peerConnection.current.setLocalDescription(offer);
+        sendSignal("offer", offer);
       }
     };
-    initWebRTC();
+
+    init();
+
+    return () => {
+      localStreamRef.current?.getTracks().forEach((t) => t.stop());
+      if (channel) supabase.removeChannel(channel);
+      peerConnection.current?.close();
+    };
   }, [sessionId, partnerInfo, rtcConfig, sendSignal, handleIncomingSignal]);
 
-  if (!partnerInfo || !sessionId) return null;
+  if (!sessionId || !partnerInfo) return null;
 
   return (
-    <div className="fixed inset-0 bg-black z-50 overflow-hidden">
-      <div className="relative w-full h-full bg-gray-900 flex items-center justify-center">
-        {/* VÍDEO REMOTO (TELA TODA) */}
+    <div className="fixed inset-0 bg-black z-50">
+      <video
+        ref={remoteVideoRef}
+        autoPlay
+        playsInline
+        className="w-full h-full object-cover"
+      />
+
+      <div className="absolute top-6 right-6 w-40 aspect-video bg-black rounded-xl overflow-hidden">
         <video
-          ref={remoteVideoRef}
+          ref={localVideoRef}
           autoPlay
           playsInline
+          muted
           className="w-full h-full object-cover"
         />
+      </div>
 
-        {/* VÍDEO LOCAL (FLUTUANTE) */}
-        <div className="absolute top-6 right-6 w-32 md:w-56 aspect-video bg-black rounded-2xl border-2 border-white/20 overflow-hidden shadow-2xl z-20">
-          <video
-            ref={localVideoRef}
-            autoPlay
-            playsInline
-            muted
-            className="w-full h-full object-cover"
-          />
-          {isVideoOff && (
-            <div className="absolute inset-0 bg-gray-800 flex items-center justify-center">
-              <VideoOff className="text-white/40 w-10 h-10" />
-            </div>
-          )}
-        </div>
+      {showChat && (
+        <VideoTextChat
+          sessionId={sessionId}
+          partnerName={partnerInfo.display_name}
+          myName={myName}
+          myId={sessionId}
+          isOpen={showChat}
+          setIsOpen={setShowChat}
+        />
+      )}
 
-        {/* CHAT FLUTUANTE (SOBRE O VÍDEO) */}
-        {showChat && (
-          <div className="absolute bottom-28 left-6 z-40 w-80 max-h-[400px] shadow-2xl">
-            <VideoTextChat
-              sessionId={sessionId}
-              partnerName={partnerInfo?.display_name || "Parceiro"}
-              myName={myName}
-              myId={sessionId}
-              isOpen={showChat}
-              setIsOpen={setShowChat}
-            />
-          </div>
-        )}
+      <div className="absolute bottom-6 left-1/2 -translate-x-1/2 flex gap-4">
+        <Button onClick={toggleAudio}>{isMuted ? <MicOff /> : <Mic />}</Button>
 
-        {/* CONTROLES */}
-        <div className="absolute bottom-10 left-1/2 -translate-x-1/2 flex items-center gap-4 px-8 py-5 bg-black/40 backdrop-blur-3xl rounded-3xl border border-white/10 z-50">
-          <Button
-            variant="ghost"
-            size="icon"
-            onClick={toggleAudio}
-            className={`rounded-full h-12 w-12 ${
-              isMuted ? "bg-red-500" : "bg-white/10 hover:bg-white/20"
-            }`}
-          >
-            {isMuted ? <MicOff /> : <Mic />}
-          </Button>
+        <Button onClick={toggleVideo}>
+          {isVideoOff ? <VideoOff /> : <VideoIcon />}
+        </Button>
 
-          <Button
-            variant="ghost"
-            size="icon"
-            onClick={toggleVideo}
-            className={`rounded-full h-12 w-12 ${
-              isVideoOff ? "bg-red-500" : "bg-white/10 hover:bg-white/20"
-            }`}
-          >
-            {isVideoOff ? <VideoOff /> : <VideoIcon />}
-          </Button>
+        <Button onClick={onSkip}>
+          <SkipForward />
+        </Button>
 
-          <Button
-            onClick={onSkip}
-            className="h-14 px-10 rounded-2xl bg-gradient-to-r from-pink-500 to-purple-600 font-bold text-white shadow-xl hover:scale-105 transition-all"
-          >
-            <SkipForward className="mr-2 h-5 w-5" /> PRÓXIMO
-          </Button>
+        <Button onClick={() => setShowChat(!showChat)}>
+          <MessageSquare />
+        </Button>
 
-          <Button
-            variant="ghost"
-            size="icon"
-            onClick={() => setShowChat(!showChat)}
-            className={`rounded-full h-12 w-12 ${
-              showChat ? "bg-purple-500" : "bg-white/10 hover:bg-white/20"
-            }`}
-          >
-            <MessageSquare />
-          </Button>
-
-          <Button
-            variant="destructive"
-            size="icon"
-            onClick={onEnd}
-            className="rounded-full h-12 w-12 shadow-lg"
-          >
-            <X />
-          </Button>
-        </div>
+        <Button variant="destructive" onClick={onEnd}>
+          <X />
+        </Button>
       </div>
     </div>
   );
