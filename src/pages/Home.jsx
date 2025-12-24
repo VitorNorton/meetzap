@@ -17,7 +17,7 @@ import {
 } from "lucide-react";
 import { supabase } from "@/lib/supabaseClient";
 
-// Importação de Componentes
+// Componentes do sistema
 import LocationSelector from "@/components/match/LocationSelector";
 import GenderSelector from "@/components/match/GenderSelector";
 import { MatchmakingService } from "@/components/match/MatchmakingService";
@@ -32,7 +32,7 @@ import TermsOfUse from "@/components/auth/TermsOfUse";
 export default function Home() {
   const [step, setStep] = useState("welcome");
 
-  // --- ESTADOS DE PREFERÊNCIAS ---
+  // Preferências
   const [country, setCountry] = useState(
     () => localStorage.getItem("meetzap_pref_country") || ""
   );
@@ -58,27 +58,28 @@ export default function Home() {
     () => localStorage.getItem("meetzap_pref_expand") !== "false"
   );
 
-  // --- ESTADOS DE SESSÃO E MATCH ---
+  // Sessão e match
   const [partner, setPartner] = useState(null);
   const [session, setSession] = useState(null);
+  const [realtimeChannel, setRealtimeChannel] = useState(null);
+  const [isSearching, setIsSearching] = useState(false);
+  const [onlineCount, setOnlineCount] = useState(0);
+
   const [userEmail, setUserEmail] = useState(
     () => localStorage.getItem("meetzap_verified_email") || ""
   );
   const [userNameLocal, setUserNameLocal] = useState(
     () => localStorage.getItem("meetzap_user_name") || ""
   );
-  const [onlineCount, setOnlineCount] = useState(0);
-  const [realtimeChannel, setRealtimeChannel] = useState(null);
-  const [isSearching, setIsSearching] = useState(false);
 
-  // --- ESTADOS DE UI ---
+  // UI
   const [showPricing, setShowPricing] = useState(false);
   const [selectedPlan, setSelectedPlan] = useState(null);
   const [showEmailSettings, setShowEmailSettings] = useState(false);
   const [showTerms, setShowTerms] = useState(false);
   const [authMode, setAuthMode] = useState("signup");
 
-  // Sincronizar preferências com LocalStorage
+  // Salvar preferências
   useEffect(() => {
     localStorage.setItem("meetzap_pref_country", country);
     localStorage.setItem("meetzap_pref_city", city);
@@ -99,6 +100,7 @@ export default function Home() {
     expandSearch,
   ]);
 
+  // Buscar perfil
   const fetchUserProfile = useCallback(async (userId) => {
     const { data } = await supabase
       .from("user_profiles")
@@ -108,46 +110,45 @@ export default function Home() {
     if (data) setUserNameLocal(data.display_name || "");
   }, []);
 
+  // Buscar sessão + contagem online
   useEffect(() => {
     const checkUser = async () => {
       const {
-        data: { session: activeSession },
+        data: { session: active },
       } = await supabase.auth.getSession();
-      if (activeSession) {
-        setUserEmail(activeSession.user.email);
-        fetchUserProfile(activeSession.user.id);
+      if (active) {
+        setUserEmail(active.user.email);
+        fetchUserProfile(active.user.id);
       }
     };
     checkUser();
 
-    const fetchOnlineCount = async () => {
-      try {
-        const oneMinuteAgo = new Date(Date.now() - 60 * 1000).toISOString();
-        const { count, error } = await supabase
-          .from("usersession")
-          .select("*", { count: "exact", head: true })
-          .gt("last_active", oneMinuteAgo);
-        if (!error) setOnlineCount((count || 0) + 53);
-      } catch (e) {
-        console.error("Erro online count:", e);
-      }
+    const fetchOnline = async () => {
+      const oneMinuteAgo = new Date(Date.now() - 60000).toISOString();
+
+      const { count } = await supabase
+        .from("usersession")
+        .select("*", { count: "exact", head: true })
+        .gt("last_active", oneMinuteAgo);
+
+      setOnlineCount((count || 0) + 53);
     };
 
-    fetchOnlineCount();
-    const interval = setInterval(fetchOnlineCount, 30000);
+    fetchOnline();
+    const interval = setInterval(fetchOnline, 30000);
     return () => clearInterval(interval);
   }, [fetchUserProfile]);
 
   const canProceed = country && city && myGender && lookingFor && myAge >= 18;
 
+  // 🔥 START SEARCHING
   const startSearching = async () => {
     if (isSearching) return;
     setIsSearching(true);
+    setStep("video");
+    setPartner(null);
 
     try {
-      setStep("video");
-      setPartner(null);
-
       const newSession = await MatchmakingService.getOrCreateSession({
         country,
         city,
@@ -161,6 +162,7 @@ export default function Home() {
 
       setSession(newSession);
 
+      // Realtime listening
       const channel = supabase
         .channel(`match:${newSession.id}`)
         .on(
@@ -176,10 +178,15 @@ export default function Home() {
               payload.new.status === "chatting" &&
               payload.new.partner_user_id
             ) {
-              setPartner(payload.new.partner_user_id);
+              setPartner({
+                user_id: payload.new.partner_user_id,
+                session_id: payload.new.partner_session_id,
+                display_name: "Parceiro",
+              });
+
               supabase.removeChannel(channel);
               setRealtimeChannel(null);
-              setIsSearching(false); // ✅ libera aqui
+              setIsSearching(false);
             }
           }
         )
@@ -187,41 +194,48 @@ export default function Home() {
 
       setRealtimeChannel(channel);
 
+      // Buscar parceiro manualmente também (fallback)
       const partnerFound = await MatchmakingService.findCompatiblePartner(
         newSession
       );
 
       if (partnerFound) {
         await MatchmakingService.connectUsers(newSession, partnerFound);
-        setPartner(partnerFound.user_id);
+
+        setPartner({
+          user_id: partnerFound.user_id,
+          session_id: partnerFound.id,
+          display_name: partnerFound.display_name || "Parceiro",
+        });
+
         supabase.removeChannel(channel);
         setRealtimeChannel(null);
-        setIsSearching(false); // ✅ libera aqui também
+        setIsSearching(false);
       }
     } catch (err) {
       console.error("Erro ao buscar match:", err);
-      setIsSearching(false); // ✅ garante liberação em erro
+      setIsSearching(false);
     }
   };
 
+  // Encerrar sessão
   const handleEnd = async () => {
-    // Verifique se o canal existe e se o status é 'joined' ou conectando antes de remover
     if (realtimeChannel) {
-      await supabase.removeChannel(realtimeChannel);
+      supabase.removeChannel(realtimeChannel);
       setRealtimeChannel(null);
     }
 
     if (session?.id) {
-      // Não precisa esperar (await) isso travar a UI, pode deixar rodar em background se quiser
       MatchmakingService.leaveQueue(session.id).catch(console.error);
     }
 
     setPartner(null);
     setSession(null);
     setStep("preferences");
-    setIsSearching(false); // Garanta que o estado de busca foi resetado
+    setIsSearching(false);
   };
 
+  // Pular
   const handleSkip = async () => {
     if (!session?.id) return;
 
@@ -237,12 +251,16 @@ export default function Home() {
 
     if (partnerFound) {
       await MatchmakingService.connectUsers(updated, partnerFound);
-      setPartner(partnerFound.user_id);
+
+      setPartner({
+        user_id: partnerFound.user_id,
+        session_id: partnerFound.id,
+        display_name: partnerFound.display_name || "Parceiro",
+      });
     }
   };
 
-  // --- RENDERIZAÇÃO ---
-
+  // TELAS
   if (step === "email_register")
     return (
       <EmailRegister
@@ -258,33 +276,33 @@ export default function Home() {
   if (step === "video") {
     if (!partner) {
       return (
-        <div className="min-h-screen bg-gradient-to-br from-gray-900 via-purple-900 to-gray-900 flex flex-col items-center justify-center p-6 text-center">
+        <div className="min-h-screen bg-gradient-to-br from-gray-900 via-purple-900 to-gray-900 flex flex-col items-center justify-center">
           <motion.div
-            initial={{ scale: 0.8, opacity: 0 }}
-            animate={{ scale: 1, opacity: 1 }}
-            className="relative mb-12"
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            className="text-center text-white"
           >
-            <div className="absolute inset-0 rounded-full bg-purple-500/20 animate-ping" />
-            <div className="relative w-32 h-32 bg-gradient-to-tr from-pink-500 to-purple-600 rounded-full flex items-center justify-center shadow-2xl">
-              <Users className="w-12 h-12 text-white animate-pulse" />
-            </div>
+            <h2 className="text-3xl font-bold mb-2">Procurando parceiro...</h2>
+            <Button
+              onClick={handleEnd}
+              variant="ghost"
+              className="text-white/40"
+            >
+              Cancelar
+            </Button>
           </motion.div>
-          <h2 className="text-3xl font-bold text-white mb-2">
-            Procurando parceiro...
-          </h2>
-          <Button
-            onClick={handleEnd}
-            variant="ghost"
-            className="text-white/40 border border-white/5 rounded-2xl px-8"
-          >
-            Cancelar
-          </Button>
         </div>
       );
     }
+
+    // 🔥 ENVIO FINAL PARA O VIDEOCHAT 100% CORRETO
     return (
       <VideoChat
-        partnerInfo={{ id: partner, display_name: "Parceiro" }}
+        partnerInfo={{
+          user_id: partner.user_id,
+          session_id: partner.session_id,
+          display_name: partner.display_name,
+        }}
         sessionId={session?.id}
         myName={userNameLocal || "Anônimo"}
         onSkip={handleSkip}
@@ -293,6 +311,7 @@ export default function Home() {
     );
   }
 
+  // TELA PRINCIPAL
   return (
     <>
       <AnimatePresence>
@@ -308,7 +327,6 @@ export default function Home() {
             setAuthMode("signup");
             setStep("email_register");
           }}
-          // CORREÇÃO AQUI: Conectando a função de fechar ao botão Cancelar
           onDecline={() => setShowTerms(false)}
         />
       )}

@@ -6,14 +6,24 @@ import { Input } from "@/components/ui/input";
 import { Send, X, ChevronDown } from "lucide-react";
 
 export default function VideoTextChat({
-  sessionId,
+  sessionId, // minha sessão
+  partnerSessionId, // sessão do parceiro
   partnerName,
-  myId,
   setIsOpen,
 }) {
   const [messages, setMessages] = useState([]);
   const [newMessage, setNewMessage] = useState("");
+  const [myUserId, setMyUserId] = useState(null);
   const scrollRef = useRef(null);
+
+  /* =========================
+     PEGAR USER ID REAL
+  ========================= */
+  useEffect(() => {
+    supabase.auth.getUser().then(({ data }) => {
+      setMyUserId(data?.user?.id || null);
+    });
+  }, []);
 
   /* =========================
      AUTO SCROLL
@@ -28,18 +38,20 @@ export default function VideoTextChat({
      REALTIME + HISTÓRICO
   ========================= */
   useEffect(() => {
-    if (!sessionId) return;
+    if (!sessionId || !partnerSessionId) return;
 
-    // Realtime
+    // ===================
+    // REALTIME
+    // ===================
     const channel = supabase
-      .channel(`chat:${sessionId}`)
+      .channel(`chat:${sessionId}:${partnerSessionId}`)
       .on(
         "postgres_changes",
         {
           event: "INSERT",
           schema: "public",
           table: "messages",
-          filter: `session_id=eq.${sessionId}`,
+          filter: `session_id=in.(${sessionId},${partnerSessionId})`,
         },
         (payload) => {
           setMessages((prev) => [...prev, payload.new]);
@@ -47,12 +59,14 @@ export default function VideoTextChat({
       )
       .subscribe();
 
-    // Histórico inicial
+    // ===================
+    // HISTÓRICO
+    // ===================
     const fetchMessages = async () => {
       const { data, error } = await supabase
         .from("messages")
         .select("*")
-        .eq("session_id", sessionId)
+        .in("session_id", [sessionId, partnerSessionId])
         .order("created_at", { ascending: true });
 
       if (!error && data) {
@@ -65,7 +79,7 @@ export default function VideoTextChat({
     return () => {
       supabase.removeChannel(channel);
     };
-  }, [sessionId]);
+  }, [sessionId, partnerSessionId]);
 
   /* =========================
      ENVIAR MENSAGEM
@@ -73,11 +87,11 @@ export default function VideoTextChat({
   const sendMessage = async (e) => {
     e.preventDefault();
 
-    if (!newMessage.trim() || !sessionId) return;
+    if (!newMessage.trim() || !sessionId || !myUserId) return;
 
     const messageData = {
       session_id: sessionId,
-      sender_id: myId,
+      sender_id: myUserId,
       text: newMessage.trim(),
     };
 
@@ -90,22 +104,18 @@ export default function VideoTextChat({
     }
   };
 
-  /* =========================
-     RENDER
-  ========================= */
   return (
     <div className="flex flex-col h-full bg-black/60 backdrop-blur-xl border-l border-white/10 text-white overflow-hidden rounded-t-3xl md:rounded-none">
-      {/* Header */}
+      {/* HEADER */}
       <div className="p-4 border-b border-white/10 flex items-center justify-between bg-white/5">
         <div>
-          <h3 className="font-bold text-sm">
-            Chat com {partnerName || "Parceiro"}
-          </h3>
+          <h3 className="font-bold text-sm">Chat com {partnerName}</h3>
           <p className="text-[10px] text-green-400 flex items-center gap-1">
             <span className="w-1.5 h-1.5 bg-green-500 rounded-full animate-pulse" />
             Ao vivo
           </p>
         </div>
+
         <Button
           variant="ghost"
           size="icon"
@@ -117,13 +127,13 @@ export default function VideoTextChat({
         </Button>
       </div>
 
-      {/* Mensagens */}
+      {/* MENSAGENS */}
       <div
         ref={scrollRef}
         className="flex-1 overflow-y-auto p-4 space-y-4 custom-scrollbar"
       >
         {messages.map((msg) => {
-          const isMe = msg.sender_id === myId;
+          const isMe = msg.sender_id === myUserId;
 
           return (
             <div
@@ -131,8 +141,9 @@ export default function VideoTextChat({
               className={`flex flex-col ${isMe ? "items-end" : "items-start"}`}
             >
               <span className="text-[10px] text-white/40 mb-1 px-1">
-                {isMe ? "Você" : partnerName || "Parceiro"}
+                {isMe ? "Você" : partnerName}
               </span>
+
               <div
                 className={`max-w-[85%] p-3 rounded-2xl text-sm ${
                   isMe
@@ -147,7 +158,7 @@ export default function VideoTextChat({
         })}
       </div>
 
-      {/* Input */}
+      {/* INPUT */}
       <form
         onSubmit={sendMessage}
         className="p-4 bg-white/5 border-t border-white/10 flex gap-2"
@@ -158,10 +169,11 @@ export default function VideoTextChat({
           placeholder="Digite algo..."
           className="bg-white/5 border-white/10 text-white placeholder:text-white/20 h-11 rounded-xl focus-visible:ring-purple-500"
         />
+
         <Button
           type="submit"
           disabled={!newMessage.trim()}
-          className="bg-purple-500 hover:bg-purple-600 h-11 w-11 p-0 rounded-xl shrink-0 transition-transform active:scale-90"
+          className="bg-purple-500 hover:bg-purple-600 h-11 w-11 p-0 rounded-xl shrink-0"
         >
           <Send className="w-5 h-5" />
         </Button>
@@ -172,7 +184,7 @@ export default function VideoTextChat({
 
 VideoTextChat.propTypes = {
   sessionId: PropTypes.string.isRequired,
+  partnerSessionId: PropTypes.string.isRequired,
   partnerName: PropTypes.string,
-  myId: PropTypes.string.isRequired,
   setIsOpen: PropTypes.func.isRequired,
 };

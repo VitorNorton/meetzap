@@ -10,7 +10,7 @@ import {
   X,
 } from "lucide-react";
 import PropTypes from "prop-types";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import VideoTextChat from "./VideoTextChat";
 
 export default function VideoChat({
@@ -26,180 +26,196 @@ export default function VideoChat({
 
   const localVideoRef = useRef(null);
   const remoteVideoRef = useRef(null);
+
   const peerConnection = useRef(null);
   const localStreamRef = useRef(null);
-  const iceCandidatesQueue = useRef([]);
+  const iceQueue = useRef([]);
 
-  const rtcConfig = useMemo(
-    () => ({
-      iceServers: [
-        { urls: "stun:stun.l.google.com:19302" },
-        {
-          urls: "turn:openrelay.metered.ca:443",
-          username: "openrelayproject",
-          credential: "openrelayproject",
-        },
-      ],
-    }),
-    []
-  );
+  const hasSentOffer = useRef(false);
+  const hasSentAnswer = useRef(false);
 
-  const toggleAudio = () => {
-    const track = localStreamRef.current?.getAudioTracks()[0];
-    if (track) {
-      track.enabled = !track.enabled;
-      setIsMuted(!track.enabled);
+  const realtimeChannelRef = useRef(null);
+
+  const parseData = useCallback((raw) => {
+    try {
+      if (typeof raw === "string") return JSON.parse(raw);
+      return raw;
+    } catch (e) {
+      console.error("❌ Erro JSON:", raw, e);
+      return null;
     }
-  };
+  }, []);
 
-  const toggleVideo = () => {
-    const track = localStreamRef.current?.getVideoTracks()[0];
-    if (track) {
-      track.enabled = !track.enabled;
-      setIsVideoOff(!track.enabled);
-    }
-  };
-
+  // ============================================================
+  // ENVIAR SINAL
+  // ============================================================
   const sendSignal = useCallback(
     async (type, data) => {
-      if (!sessionId || !partnerInfo?.id) return;
+      if (!sessionId || !partnerInfo?.session_id) return;
+
       await supabase.from("VideoSignal").insert({
         from_session_id: sessionId,
-        to_session_id: partnerInfo.id,
+        to_session_id: partnerInfo.session_id,
         type,
-        data,
+        data: JSON.stringify(data),
       });
     },
-    [sessionId, partnerInfo?.id]
+    [sessionId, partnerInfo?.session_id]
   );
 
-  const handleIncomingSignal = useCallback(
+  // ============================================================
+  // RECEBER SINAL
+  // ============================================================
+  const handleSignal = useCallback(
     async (signal) => {
       if (!peerConnection.current) return;
       if (signal.from_session_id === sessionId) return;
 
-      const { type, data } = signal;
+      const signalData = parseData(signal.data);
 
-      try {
-        if (type === "offer") {
-          if (peerConnection.current.signalingState !== "stable") return;
+      // OFFER
+      if (signal.type === "offer" && !hasSentAnswer.current) {
+        await peerConnection.current.setRemoteDescription(
+          new RTCSessionDescription(signalData)
+        );
 
-          await peerConnection.current.setRemoteDescription(
-            new RTCSessionDescription(data)
+        const answer = await peerConnection.current.createAnswer();
+        await peerConnection.current.setLocalDescription(answer);
+
+        sendSignal("answer", answer);
+        hasSentAnswer.current = true;
+
+        while (iceQueue.current.length > 0) {
+          await peerConnection.current.addIceCandidate(
+            iceQueue.current.shift()
           );
-
-          const answer = await peerConnection.current.createAnswer();
-          await peerConnection.current.setLocalDescription(answer);
-          sendSignal("answer", answer);
-
-          while (iceCandidatesQueue.current.length) {
-            await peerConnection.current.addIceCandidate(
-              iceCandidatesQueue.current.shift()
-            );
-          }
-        } else if (type === "answer") {
-          if (peerConnection.current.signalingState === "have-local-offer") {
-            await peerConnection.current.setRemoteDescription(
-              new RTCSessionDescription(data)
-            );
-
-            while (iceCandidatesQueue.current.length) {
-              await peerConnection.current.addIceCandidate(
-                iceCandidatesQueue.current.shift()
-              );
-            }
-          }
-        } else if (type === "ice") {
-          const candidate = new RTCIceCandidate({
-            candidate: data.candidate,
-            sdpMid: data.sdpMid,
-            sdpMLineIndex: data.sdpMLineIndex,
-          });
-
-          if (peerConnection.current.remoteDescription) {
-            await peerConnection.current.addIceCandidate(candidate);
-          } else {
-            iceCandidatesQueue.current.push(candidate);
-          }
         }
-      } catch (err) {
-        console.error("Erro no signaling:", err);
+      }
+
+      // ANSWER
+      if (signal.type === "answer") {
+        await peerConnection.current.setRemoteDescription(
+          new RTCSessionDescription(signalData)
+        );
+
+        while (iceQueue.current.length > 0) {
+          await peerConnection.current.addIceCandidate(
+            iceQueue.current.shift()
+          );
+        }
+      }
+
+      // ICE
+      if (signal.type === "ice") {
+        const candidate = new RTCIceCandidate(signalData);
+
+        if (peerConnection.current.remoteDescription) {
+          await peerConnection.current.addIceCandidate(candidate);
+        } else {
+          iceQueue.current.push(candidate);
+        }
       }
     },
-    [sendSignal, sessionId]
+    [parseData, sendSignal, sessionId]
   );
 
+  // ============================================================
+  // INICIAR WEBRTC
+  // ============================================================
   useEffect(() => {
-    if (!sessionId || !partnerInfo?.id) return;
+    if (!sessionId || !partnerInfo?.session_id) return;
 
-    let channel;
+    const init = async () => {
+      try {
+        const stream = await navigator.mediaDevices.getUserMedia({
+          video: true,
+          audio: true,
+        });
 
-    const initWebRTC = async () => {
-      const stream = await navigator.mediaDevices.getUserMedia({
-        video: {
-          width: { ideal: 1280 },
-          height: { ideal: 720 },
-          frameRate: { ideal: 30 },
-        },
-        audio: true,
-      });
+        localStreamRef.current = stream;
+        localVideoRef.current.srcObject = stream;
 
-      localStreamRef.current = stream;
-      if (localVideoRef.current) localVideoRef.current.srcObject = stream;
+        peerConnection.current = new RTCPeerConnection(RTC_CONFIG);
 
-      peerConnection.current = new RTCPeerConnection(rtcConfig);
+        stream.getTracks().forEach((t) => {
+          peerConnection.current.addTrack(t, stream);
+        });
 
-      stream
-        .getTracks()
-        .forEach((track) => peerConnection.current.addTrack(track, stream));
+        peerConnection.current.ontrack = (event) => {
+          remoteVideoRef.current.srcObject = event.streams[0];
+        };
 
-      peerConnection.current.ontrack = (e) => {
-        if (remoteVideoRef.current)
-          remoteVideoRef.current.srcObject = e.streams[0];
-      };
+        peerConnection.current.onicecandidate = (event) => {
+          if (event.candidate) {
+            sendSignal("ice", event.candidate);
+          }
+        };
 
-      peerConnection.current.onicecandidate = (e) => {
-        if (e.candidate) sendSignal("ice", e.candidate);
-      };
+        const channel = supabase
+          .channel(`videosignal:${sessionId}`)
+          .on(
+            "postgres_changes",
+            {
+              event: "INSERT",
+              schema: "public",
+              table: "VideoSignal",
+              filter: `to_session_id=eq.${sessionId}`,
+            },
+            (payload) => handleSignal(payload.new)
+          )
+          .subscribe();
 
-      channel = supabase
-        .channel(`signals:${sessionId}`)
-        .on(
-          "postgres_changes",
-          {
-            event: "INSERT",
-            schema: "public",
-            table: "VideoSignal",
-            filter: `to_session_id=eq.${sessionId}`,
-          },
-          (payload) => handleIncomingSignal(payload.new)
-        )
-        .subscribe();
+        realtimeChannelRef.current = channel;
 
-      const isCaller = sessionId.localeCompare(partnerInfo.id) < 0;
+        const amCaller =
+          String(sessionId).localeCompare(String(partnerInfo.session_id)) < 0;
 
-      if (isCaller) {
-        const offer = await peerConnection.current.createOffer();
-        await peerConnection.current.setLocalDescription(offer);
-        sendSignal("offer", offer);
+        if (amCaller && !hasSentOffer.current) {
+          const offer = await peerConnection.current.createOffer();
+          await peerConnection.current.setLocalDescription(offer);
+          sendSignal("offer", offer);
+          hasSentOffer.current = true;
+        }
+      } catch (err) {
+        console.error("❌ Erro WebRTC:", err);
       }
     };
 
-    initWebRTC();
+    init();
 
     return () => {
       localStreamRef.current?.getTracks().forEach((t) => t.stop());
-      if (channel) supabase.removeChannel(channel);
       peerConnection.current?.close();
+      if (realtimeChannelRef.current) {
+        supabase.removeChannel(realtimeChannelRef.current);
+      }
     };
-  }, [sessionId, partnerInfo, rtcConfig, sendSignal, handleIncomingSignal]);
+  }, [sessionId, partnerInfo?.session_id, handleSignal, sendSignal]);
+
+  // ============================================================
+  // CONTROLES
+  // ============================================================
+  const toggleAudio = () => {
+    const track = localStreamRef.current?.getAudioTracks()[0];
+    track.enabled = !track.enabled;
+    setIsMuted(!track.enabled);
+  };
+
+  const toggleVideo = () => {
+    const track = localStreamRef.current?.getVideoTracks()[0];
+    track.enabled = !track.enabled;
+    setIsVideoOff(!track.enabled);
+  };
 
   if (!partnerInfo || !sessionId) return null;
 
+  // ============================================================
+  // UI
+  // ============================================================
   return (
     <div className="fixed inset-0 bg-black z-50 overflow-hidden">
       <div className="relative w-full h-full bg-gray-900 flex items-center justify-center">
-        {/* VÍDEO REMOTO (TELA TODA) */}
+        {/* REMOTE VIDEO */}
         <video
           ref={remoteVideoRef}
           autoPlay
@@ -207,8 +223,8 @@ export default function VideoChat({
           className="w-full h-full object-cover"
         />
 
-        {/* VÍDEO LOCAL (FLUTUANTE) */}
-        <div className="absolute top-6 right-6 w-32 md:w-56 aspect-video bg-black rounded-2xl border-2 border-white/20 overflow-hidden shadow-2xl z-20">
+        {/* LOCAL VIDEO */}
+        <div className="absolute top-6 right-6 w-32 md:w-56 aspect-video rounded-xl overflow-hidden shadow-xl border border-white/20 bg-black">
           <video
             ref={localVideoRef}
             autoPlay
@@ -217,45 +233,42 @@ export default function VideoChat({
             className="w-full h-full object-cover"
           />
           {isVideoOff && (
-            <div className="absolute inset-0 bg-gray-800 flex items-center justify-center">
-              <VideoOff className="text-white/40 w-10 h-10" />
+            <div className="absolute inset-0 bg-black/70 flex items-center justify-center">
+              <VideoOff className="w-10 h-10 text-white/40" />
             </div>
           )}
         </div>
 
-        {/* CHAT FLUTUANTE */}
+        {/* TEXT CHAT */}
         {showChat && (
-          <div className="absolute bottom-28 left-6 z-40 w-80 max-h-[400px] shadow-2xl">
+          <div className="absolute bottom-28 left-6 z-40 w-80 max-h-[400px]">
             <VideoTextChat
               sessionId={sessionId}
-              partnerName={partnerInfo?.display_name || "Parceiro"}
+              partnerSessionId={partnerInfo.session_id}
+              partnerName={partnerInfo.display_name}
               myName={myName}
-              myId={sessionId}
-              isOpen={showChat}
               setIsOpen={setShowChat}
             />
           </div>
         )}
 
-        {/* CONTROLES */}
-        <div className="absolute bottom-10 left-1/2 -translate-x-1/2 flex items-center gap-4 px-8 py-5 bg-black/40 backdrop-blur-3xl rounded-3xl border border-white/10 z-50">
+        {/* CONTROLS */}
+        <div className="absolute bottom-10 left-1/2 -translate-x-1/2 flex gap-4 px-8 py-5 bg-black/40 rounded-3xl shadow-xl backdrop-blur-xl border border-white/10">
           <Button
-            variant="ghost"
-            size="icon"
             onClick={toggleAudio}
-            className={`rounded-full h-12 w-12 ${
-              isMuted ? "bg-red-500" : "bg-white/10 hover:bg-white/20"
+            size="icon"
+            className={`h-12 w-12 rounded-full ${
+              isMuted ? "bg-red-500" : "bg-white/10"
             }`}
           >
             {isMuted ? <MicOff /> : <Mic />}
           </Button>
 
           <Button
-            variant="ghost"
-            size="icon"
             onClick={toggleVideo}
-            className={`rounded-full h-12 w-12 ${
-              isVideoOff ? "bg-red-500" : "bg-white/10 hover:bg-white/20"
+            size="icon"
+            className={`h-12 w-12 rounded-full ${
+              isVideoOff ? "bg-red-500" : "bg-white/10"
             }`}
           >
             {isVideoOff ? <VideoOff /> : <VideoIcon />}
@@ -263,27 +276,26 @@ export default function VideoChat({
 
           <Button
             onClick={onSkip}
-            className="h-14 px-10 rounded-2xl bg-gradient-to-r from-pink-500 to-purple-600 font-bold text-white shadow-xl hover:scale-105 transition-all"
+            className="h-14 px-10 rounded-2xl bg-gradient-to-r from-pink-500 to-purple-600 text-lg font-bold"
           >
-            <SkipForward className="mr-2 h-5 w-5" /> PRÓXIMO
+            <SkipForward className="mr-2" /> PRÓXIMO
           </Button>
 
           <Button
-            variant="ghost"
             size="icon"
             onClick={() => setShowChat(!showChat)}
-            className={`rounded-full h-12 w-12 ${
-              showChat ? "bg-purple-500" : "bg-white/10 hover:bg-white/20"
+            className={`h-12 w-12 rounded-full ${
+              showChat ? "bg-purple-500" : "bg-white/10"
             }`}
           >
             <MessageSquare />
           </Button>
 
           <Button
-            variant="destructive"
             size="icon"
+            variant="destructive"
             onClick={onEnd}
-            className="rounded-full h-12 w-12 shadow-lg"
+            className="h-12 w-12 rounded-full"
           >
             <X />
           </Button>
@@ -293,12 +305,20 @@ export default function VideoChat({
   );
 }
 
+const RTC_CONFIG = {
+  iceServers: [
+    { urls: "stun:stun.l.google.com:19302" },
+    {
+      urls: "turn:openrelay.metered.ca:443",
+      username: "openrelayproject",
+      credential: "openrelayproject",
+    },
+  ],
+};
+
 VideoChat.propTypes = {
   sessionId: PropTypes.string.isRequired,
-  partnerInfo: PropTypes.shape({
-    id: PropTypes.string.isRequired,
-    display_name: PropTypes.string,
-  }).isRequired,
+  partnerInfo: PropTypes.object.isRequired,
   myName: PropTypes.string,
   onSkip: PropTypes.func.isRequired,
   onEnd: PropTypes.func.isRequired,

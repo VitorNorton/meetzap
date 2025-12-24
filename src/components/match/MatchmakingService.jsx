@@ -45,21 +45,32 @@ export const MatchmakingService = {
   // BUSCA PARCEIRO COMPATÍVEL
   // ===============================
   async findCompatiblePartner(mySession) {
-    const oneMinuteAgo = new Date(Date.now() - 60_000).toISOString();
-
-    const { data: candidates, error } = await supabase
+    // 1. Buscar sessão waiting
+    const { data: partnerSession, error } = await supabase
       .from("usersession")
-      .select("*")
+      .select(
+        "id, user_id, partner_user_id, partner_session_id, country, city, gender, age"
+      )
       .eq("status", "waiting")
-      .is("partner_user_id", null)
       .neq("user_id", mySession.user_id)
-      .gt("last_active", oneMinuteAgo);
+      .limit(1)
+      .maybeSingle();
 
     if (error) throw error;
-    if (!candidates || candidates.length === 0) return null;
+    if (!partnerSession) return null;
 
-    // 👉 Match simples (pode evoluir depois)
-    return candidates[0];
+    // 2. Buscar nome no user_profiles
+    const { data: profile } = await supabase
+      .from("user_profiles")
+      .select("display_name")
+      .eq("id", partnerSession.user_id)
+      .single();
+
+    // 3. Anexar display_name ao retorno
+    return {
+      ...partnerSession,
+      display_name: profile?.display_name || "Parceiro",
+    };
   },
 
   // ===============================
@@ -73,6 +84,7 @@ export const MatchmakingService = {
       .update({
         status: "chatting",
         partner_user_id: partnerSession.user_id,
+        partner_session_id: partnerSession.id, // 🔥 ESSENCIAL
         last_active: now,
       })
       .eq("id", mySession.id);
@@ -82,11 +94,13 @@ export const MatchmakingService = {
       .update({
         status: "chatting",
         partner_user_id: mySession.user_id,
+        partner_session_id: mySession.id, // 🔥 ESSENCIAL
         last_active: now,
       })
       .eq("id", partnerSession.id);
 
     await Promise.all([updateMe, updatePartner]);
+
     return true;
   },
 
