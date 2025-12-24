@@ -68,6 +68,8 @@ export default function Home() {
     () => localStorage.getItem("meetzap_user_name") || ""
   );
   const [onlineCount, setOnlineCount] = useState(0);
+  const [realtimeChannel, setRealtimeChannel] = useState(null);
+  const [isSearching, setIsSearching] = useState(false);
 
   // --- ESTADOS DE UI ---
   const [showPricing, setShowPricing] = useState(false);
@@ -139,71 +141,103 @@ export default function Home() {
   const canProceed = country && city && myGender && lookingFor && myAge >= 18;
 
   const startSearching = async () => {
-    setStep("video");
-    setPartner(null);
-    const newSession = await MatchmakingService.joinQueue({
-      country,
-      city,
-      gender: myGender,
-      looking_for: lookingFor,
-      age: myAge,
-      min_age: minAge,
-      max_age: maxAge,
-      expand_search: expandSearch,
-    });
-    setSession(newSession);
+    if (isSearching) return;
+    setIsSearching(true);
 
-    const channel = supabase
-      .channel(`match:${newSession.id}`)
-      .on(
-        "postgres_changes",
-        {
-          event: "UPDATE",
-          schema: "public",
-          table: "usersession",
-          filter: `id=eq.${newSession.id}`,
-        },
-        async (payload) => {
-          if (payload.new.status === "chatting" && payload.new.partner_id) {
-            const matched = await MatchmakingService.checkIfMatched(
-              newSession.id
-            );
-            if (matched) {
-              setPartner(matched);
+    try {
+      setStep("video");
+      setPartner(null);
+
+      const newSession = await MatchmakingService.getOrCreateSession({
+        country,
+        city,
+        gender: myGender,
+        looking_for: lookingFor,
+        age: myAge,
+        min_age: minAge,
+        max_age: maxAge,
+        expand_search: expandSearch,
+      });
+
+      setSession(newSession);
+
+      const channel = supabase
+        .channel(`match:${newSession.id}`)
+        .on(
+          "postgres_changes",
+          {
+            event: "UPDATE",
+            schema: "public",
+            table: "usersession",
+            filter: `id=eq.${newSession.id}`,
+          },
+          (payload) => {
+            if (
+              payload.new.status === "chatting" &&
+              payload.new.partner_user_id
+            ) {
+              setPartner(payload.new.partner_user_id);
               supabase.removeChannel(channel);
+              setRealtimeChannel(null);
+              setIsSearching(false); // ✅ libera aqui
             }
           }
-        }
-      )
-      .subscribe();
+        )
+        .subscribe();
 
-    const partnerFound = await MatchmakingService.findCompatiblePartner(
-      newSession
-    );
-    if (partnerFound) {
-      await MatchmakingService.connectUsers(newSession, partnerFound);
-      setPartner(partnerFound);
-      supabase.removeChannel(channel);
+      setRealtimeChannel(channel);
+
+      const partnerFound = await MatchmakingService.findCompatiblePartner(
+        newSession
+      );
+
+      if (partnerFound) {
+        await MatchmakingService.connectUsers(newSession, partnerFound);
+        setPartner(partnerFound.user_id);
+        supabase.removeChannel(channel);
+        setRealtimeChannel(null);
+        setIsSearching(false); // ✅ libera aqui também
+      }
+    } catch (err) {
+      console.error("Erro ao buscar match:", err);
+      setIsSearching(false); // ✅ garante liberação em erro
     }
   };
 
   const handleEnd = async () => {
-    if (session?.id) {
-      await MatchmakingService.leaveQueue(session.id);
+    // Verifique se o canal existe e se o status é 'joined' ou conectando antes de remover
+    if (realtimeChannel) {
+      await supabase.removeChannel(realtimeChannel);
+      setRealtimeChannel(null);
     }
+
+    if (session?.id) {
+      // Não precisa esperar (await) isso travar a UI, pode deixar rodar em background se quiser
+      MatchmakingService.leaveQueue(session.id).catch(console.error);
+    }
+
     setPartner(null);
     setSession(null);
     setStep("preferences");
+    setIsSearching(false); // Garanta que o estado de busca foi resetado
   };
 
   const handleSkip = async () => {
-    if (session?.id) {
-      const updated = await MatchmakingService.skipAndFindNext(session.id);
-      if (updated) {
-        setSession(updated);
-        setPartner(null);
-        startSearching();
-      }
+    if (!session?.id) return;
+
+    const updated = await MatchmakingService.skipAndFindNext(session.id);
+    if (!updated) return;
+
+    setSession(updated);
+    setPartner(null);
+
+    const partnerFound = await MatchmakingService.findCompatiblePartner(
+      updated
+    );
+
+    if (partnerFound) {
+      await MatchmakingService.connectUsers(updated, partnerFound);
+      setPartner(partnerFound.user_id);
     }
   };
 
@@ -250,7 +284,7 @@ export default function Home() {
     }
     return (
       <VideoChat
-        partnerInfo={partner}
+        partnerInfo={{ id: partner, display_name: "Parceiro" }}
         sessionId={session?.id}
         myName={userNameLocal || "Anônimo"}
         onSkip={handleSkip}
