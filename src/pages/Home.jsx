@@ -286,7 +286,7 @@ export default function Home() {
             <Button
               onClick={handleEnd}
               variant="ghost"
-              className="text-white/40"
+              className="w-full h-10 rounded-2xl bg-gradient-to-r from-pink-500 via-purple-500 to-blue-500 font-bold text-lg shadow-xl"
             >
               Cancelar
             </Button>
@@ -406,10 +406,11 @@ export default function Home() {
                 {userEmail ? (
                   <>
                     <p className="text-white/60 text-sm mb-4">
-                      Olá,{" "}
+                      Olá,{"  "}
                       <span className="text-white font-bold">
-                        {userNameLocal || "!"}
+                        {userNameLocal}
                       </span>
+                      !
                     </p>
                     <Button
                       onClick={() => setShowPricing(true)}
